@@ -52,7 +52,7 @@ pub mod host_comm;
 pub mod memory;
 #[cfg(target_arch = "x86_64")]
 pub mod paging;
-mod virtq_init;
+mod virtq;
 
 // Globals
 #[cfg(all(feature = "mem_profile", target_arch = "x86_64"))]
@@ -237,7 +237,7 @@ pub(crate) extern "C" fn generic_init(
     }
 
     // Initialize virtqueues
-    virtq_init::init_virtqueues();
+    virtq::init_virtqueues();
 
     // set up the logger
     let guest_log_level_filter =
