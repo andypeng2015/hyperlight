@@ -15,6 +15,7 @@ limitations under the License.
  */
 #[cfg(feature = "nanvix-unstable")]
 use std::mem::offset_of;
+use std::num::NonZeroU16;
 
 use flatbuffers::FlatBufferBuilder;
 use hyperlight_common::flatbuffer_wrappers::function_call::{
@@ -22,6 +23,7 @@ use hyperlight_common::flatbuffer_wrappers::function_call::{
 };
 use hyperlight_common::flatbuffer_wrappers::function_types::FunctionCallResult;
 use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
+use hyperlight_common::virtq::Layout as VirtqLayout;
 use hyperlight_common::vmem::{self, PAGE_TABLE_SIZE, PageTableEntry, PhysAddr};
 #[cfg(all(feature = "crashdump", not(feature = "nanvix-unstable")))]
 use hyperlight_common::vmem::{BasicMapping, MappingKind};
@@ -554,6 +556,25 @@ impl SandboxMemoryManager<HostSharedMemory> {
             SandboxMemoryLayout::STACK_POINTER_SIZE_BYTES,
         )?;
 
+        // Write virtqueue metadata to scratch-top so the guest can
+        // discover ring locations without reading the PEB.
+        self.update_scratch_bookkeeping_item(
+            SCRATCH_TOP_G2H_RING_GVA_OFFSET,
+            self.layout.get_g2h_ring_gva(),
+        )?;
+        self.update_scratch_bookkeeping_item(
+            SCRATCH_TOP_H2G_RING_GVA_OFFSET,
+            self.layout.get_h2g_ring_gva(),
+        )?;
+        self.scratch_mem.write::<u16>(
+            scratch_size - SCRATCH_TOP_G2H_QUEUE_DEPTH_OFFSET as usize,
+            self.layout.sandbox_memory_config.get_g2h_queue_depth() as u16,
+        )?;
+        self.scratch_mem.write::<u16>(
+            scratch_size - SCRATCH_TOP_H2G_QUEUE_DEPTH_OFFSET as usize,
+            self.layout.sandbox_memory_config.get_h2g_queue_depth() as u16,
+        )?;
+
         // Copy the page tables into the scratch region
         let snapshot_pt_end = self.shared_mem.mem_size();
         let snapshot_pt_size = self.layout.get_pt_size();
@@ -792,6 +813,30 @@ impl SandboxMemoryManager<HostSharedMemory> {
                 Ok(result)
             })
         })??
+    }
+
+    /// Compute the G2H virtqueue Layout from scratch region addresses.
+    pub(crate) fn g2h_virtq_layout(&self) -> Result<hyperlight_common::virtq::Layout> {
+        let base = self.layout.get_g2h_ring_gva();
+        let depth = self.layout.sandbox_memory_config.get_g2h_queue_depth();
+
+        let nz = NonZeroU16::new(depth as u16)
+            .ok_or_else(|| new_error!("G2H queue depth is zero"))?;
+
+        unsafe { VirtqLayout::from_base(base, nz) }
+            .map_err(|e| new_error!("Invalid G2H virtq layout: {:?}", e))
+    }
+
+    /// Compute the H2G virtqueue Layout from scratch region addresses.
+    pub(crate) fn h2g_virtq_layout(&self) -> Result<hyperlight_common::virtq::Layout> {
+        let base = self.layout.get_h2g_ring_gva();
+        let depth = self.layout.sandbox_memory_config.get_h2g_queue_depth();
+
+        let nz = NonZeroU16::new(depth as u16)
+            .ok_or_else(|| new_error!("H2G queue depth is zero"))?;
+
+        unsafe { VirtqLayout::from_base(base, nz) }
+            .map_err(|e| new_error!("Invalid H2G virtq layout: {:?}", e))
     }
 }
 
