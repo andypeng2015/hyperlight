@@ -22,6 +22,7 @@ use hyperlight_common::flatbuffer_wrappers::function_call::{FunctionCall, Functi
 use hyperlight_common::flatbuffer_wrappers::function_types::{FunctionCallResult, ParameterType};
 use hyperlight_common::flatbuffer_wrappers::guest_error::{ErrorCode, GuestError};
 use hyperlight_guest::error::{HyperlightGuestError, Result};
+use hyperlight_guest::virtq;
 use tracing::instrument;
 
 use crate::{GUEST_HANDLE, REGISTERED_GUEST_FUNCTIONS};
@@ -86,6 +87,10 @@ pub(crate) fn internal_dispatch_function() {
     };
 
     let handle = unsafe { GUEST_HANDLE };
+
+    // After snapshot restore, the ring memory is zeroed but the
+    // producer's cursors are stale. Check once per dispatch entry.
+    virtq::reset_global_context();
 
     let function_call = handle
         .try_pop_shared_input_data_into::<FunctionCall>()
