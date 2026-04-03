@@ -26,7 +26,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use context::GuestContext;
-use hyperlight_common::layout::{SCRATCH_TOP_VIRTQ_GENERATION_OFFSET, scratch_top_ptr};
+use hyperlight_common::layout::{SCRATCH_TOP_SNAPSHOT_GENERATION_OFFSET, scratch_top_ptr};
 pub use mem::GuestMemOps;
 
 // Init state machine
@@ -81,19 +81,16 @@ pub fn set_global_context(ctx: GuestContext) {
 
 /// Reset the global context if a snapshot restore was detected.
 /// Compares the virtq generation counter in scratch-top metadata.
-pub fn reset_global_context() {
+pub fn maybe_reset_global_context() {
     if !is_initialized() {
         return;
     }
-    let current_gen = read_gen();
+
+    let current_gen = unsafe { *scratch_top_ptr::<u16>(SCRATCH_TOP_SNAPSHOT_GENERATION_OFFSET) };
+
     with_context(|ctx| {
         if current_gen != ctx.generation() {
             ctx.reset(current_gen);
         }
     });
-}
-
-/// Read the current virtqueue generation from scratch-top metadata.
-fn read_gen() -> u16 {
-    unsafe { *scratch_top_ptr::<u16>(SCRATCH_TOP_VIRTQ_GENERATION_OFFSET) }
 }
