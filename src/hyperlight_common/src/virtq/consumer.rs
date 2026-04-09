@@ -15,7 +15,6 @@ limitations under the License.
 */
 
 use alloc::vec;
-use alloc::vec::Vec;
 
 use bytes::Bytes;
 use fixedbitset::FixedBitSet;

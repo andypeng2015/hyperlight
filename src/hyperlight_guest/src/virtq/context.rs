@@ -71,13 +71,13 @@ pub struct QueueConfig {
 pub struct GuestContext {
     g2h_producer: G2hProducer,
     h2g_producer: H2gProducer,
-    generation: u16,
+    generation: u32,
     last_host_result: Option<Result<ReturnValue>>,
 }
 
 impl GuestContext {
     /// Create a new context with G2H and H2G queues.
-    pub fn new(g2h: QueueConfig, h2g: QueueConfig, generation: u16) -> Self {
+    pub fn new(g2h: QueueConfig, h2g: QueueConfig, generation: u32) -> Self {
         let size = g2h.pool_pages * PAGE_SIZE_USIZE;
         let g2h_pool =
             BufferPool::new(g2h.pool_gva, size).expect("failed to create G2H buffer pool");
@@ -233,6 +233,71 @@ impl GuestContext {
         Ok(())
     }
 
+    /// Restore the H2G producer after snapshot restore.
+    ///
+    /// Creates a new [`RecyclePool`] at `pool_gva` and calls
+    /// [`restore_from_ring`] to reconstruct inflight state
+    /// from the host's prefilled descriptors.
+    pub fn restore_h2g(&mut self, pool_gva: u64, pool_size: usize) {
+        let pool = RecyclePool::new(pool_gva, pool_size, PAGE_SIZE_USIZE)
+            .expect("H2G RecyclePool creation failed");
+
+        self.h2g_producer
+            .restore_from_ring(pool)
+            .expect("H2G restore_from_ring failed");
+    }
+
+    /// Reset the G2H producer with a fresh pool.
+    ///
+    /// Creates a new [`BufferPool`] at `pool_gva` and resets the
+    /// producer to its initial state.
+    pub fn reset_g2h(&mut self, pool_gva: u64, pool_size: usize) {
+        let pool = BufferPool::new(pool_gva, pool_size).expect("G2H BufferPool creation failed");
+        self.g2h_producer.reset_with_pool(pool);
+        self.last_host_result = None;
+    }
+
+    /// Send a log message via the G2H queue. Fire-and-forget.
+    pub fn emit_log(&mut self, log_data: &[u8]) -> Result<()> {
+        self.send_g2h_oneshot(MsgKind::Log, log_data)
+    }
+
+    /// Get the current generation counter.
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    /// Set the generation counter after snapshot restore.
+    pub fn set_generation(&mut self, generation: u32) {
+        self.generation = generation;
+    }
+
+    /// Stash a host function result for later retrieval.
+    ///
+    /// Used by the C API's two-step calling convention where
+    /// `hl_call_host_function` and `hl_get_host_return_value_as_*`
+    /// are separate calls.
+    pub fn stash_host_result(&mut self, result: Result<ReturnValue>) {
+        self.last_host_result = Some(result);
+    }
+
+    /// Take the stashed host return value.
+    ///
+    /// Panics if no value was stashed or if the type conversion fails.
+    /// If the stashed result was an error, panics with the error message.
+    pub fn take_host_return<T: TryFrom<ReturnValue>>(&mut self) -> T {
+        let val = self
+            .last_host_result
+            .take()
+            .expect("No host return value available")
+            .expect("Host function returned an error");
+
+        match T::try_from(val) {
+            Ok(v) => v,
+            Err(_) => panic!("Host return value type mismatch"),
+        }
+    }
+
     /// Pre-fill the H2G queue with completion-only descriptors so the host
     /// can write incoming call payloads into them.
     fn prefill_h2g(&mut self) {
@@ -287,35 +352,6 @@ impl GuestContext {
         }
     }
 
-    /// Drain any pending G2H completions.
-    ///
-    /// This is called before checking for H2G calls so that the host
-    /// can reclaim G2H response buffers.
-    pub fn drain_g2h_completions(&mut self) {
-        while let Ok(Some(_)) = self.g2h_producer.poll() {}
-    }
-
-    /// Send a log message via the G2H queue. Fire-and-forget.
-    pub fn emit_log(&mut self, log_data: &[u8]) -> Result<()> {
-        self.send_g2h_oneshot(MsgKind::Log, log_data)
-    }
-
-    /// Reset ring and pool state after snapshot restore.
-    pub(super) fn reset(&mut self, new_generation: u16) {
-        // G2H producer reset also resets the pool via BufferProvider::reset()
-        self.g2h_producer.reset();
-        // H2G state is NOT reset. The guest's inflight and cursors
-        // survived via CoW and are already correct. The host's
-        // restore_h2g_prefill() wrote matching descriptors to the
-        // zeroed ring memory. Both sides are in sync.
-        self.generation = new_generation;
-        self.last_host_result = None;
-    }
-
-    pub(super) fn generation(&self) -> u16 {
-        self.generation
-    }
-
     fn try_send_readonly(
         &mut self,
         header: &[u8],
@@ -345,31 +381,5 @@ impl GuestContext {
         entry.write_all(header)?;
         entry.write_all(payload)?;
         self.g2h_producer.submit(entry)
-    }
-
-    /// Stash a host function result for later retrieval.
-    ///
-    /// Used by the C API's two-step calling convention where
-    /// `hl_call_host_function` and `hl_get_host_return_value_as_*`
-    /// are separate calls.
-    pub fn stash_host_result(&mut self, result: Result<ReturnValue>) {
-        self.last_host_result = Some(result);
-    }
-
-    /// Take the stashed host return value.
-    ///
-    /// Panics if no value was stashed or if the type conversion fails.
-    /// If the stashed result was an error, panics with the error message.
-    pub fn take_host_return<T: TryFrom<ReturnValue>>(&mut self) -> T {
-        let val = self
-            .last_host_result
-            .take()
-            .expect("No host return value available")
-            .expect("Host function returned an error");
-
-        match T::try_from(val) {
-            Ok(v) => v,
-            Err(_) => panic!("Host return value type mismatch"),
-        }
     }
 }
